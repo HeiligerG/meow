@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/redis/go-redis/v9"
 	"io"
 	"log"
 	"net/http"
@@ -17,10 +19,8 @@ import (
 	"github.com/patrickbucher/meow"
 )
 
-// Config maps the identifiers to endpoints.
 type Config map[string]*meow.Endpoint
 
-// ConcurrentConfig wraps the config together with a mutex.
 type ConcurrentConfig struct {
 	mu     sync.RWMutex
 	config Config
@@ -38,13 +38,31 @@ func main() {
 
 	cfg.config = mustReadConfig(*file)
 
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "localhost:6380"
+	}
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisURL,
+		Password: "",
+		DB:       0,
+	})
+
+	ctx := context.Background()
+	_, err := rdb.Ping(ctx).Result()
+	if err != nil {
+		log.Fatalf("Could not connect to Redis: %v", err)
+	}
+
 	http.HandleFunc("/endpoints/", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			getEndpoint(w, r)
+			getEndpoint(w, r, rdb)
 		case http.MethodPost:
-			postEndpoint(w, r, *file)
-		// TODO: support http.MethodDelete to delete endpoints
+			postEndpoint(w, r, rdb, *file)
+		case http.MethodDelete:
+			deleteEndpoint(w, r, rdb)
 		default:
 			log.Printf("request from %s rejected: method %s not allowed",
 				r.RemoteAddr, r.Method)
@@ -52,7 +70,7 @@ func main() {
 		}
 	})
 	http.HandleFunc("/endpoints", func(w http.ResponseWriter, r *http.Request) {
-		getEndpoints(w, r)
+		getEndpoints(w, r, rdb)
 	})
 
 	listenTo := fmt.Sprintf("%s:%d", *addr, *port)
@@ -60,7 +78,7 @@ func main() {
 	http.ListenAndServe(listenTo, nil)
 }
 
-func getEndpoint(w http.ResponseWriter, r *http.Request) {
+func getEndpoint(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
 	log.Printf("GET %s from %s", r.URL, r.RemoteAddr)
 	identifier, err := extractEndpointIdentifier(r.URL.String())
 	if err != nil {
@@ -85,7 +103,7 @@ func getEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func postEndpoint(w http.ResponseWriter, r *http.Request, file string) {
+func postEndpoint(w http.ResponseWriter, r *http.Request, rdb *redis.Client, file string) {
 	log.Printf("POST %s from %s", r.URL, r.RemoteAddr)
 	buf := bytes.NewBufferString("")
 	io.Copy(buf, r.Body)
@@ -101,7 +119,6 @@ func postEndpoint(w http.ResponseWriter, r *http.Request, file string) {
 	cfg.mu.RUnlock()
 	var status int
 	if exists {
-		// updating existing endpoint
 		identifierPathParam, err := extractEndpointIdentifier(r.URL.String())
 		if err != nil {
 			log.Printf("extract endpoint identifier of %s: %v", r.URL, err)
@@ -127,7 +144,21 @@ func postEndpoint(w http.ResponseWriter, r *http.Request, file string) {
 	w.WriteHeader(status)
 }
 
-func getEndpoints(w http.ResponseWriter, r *http.Request) {
+func deleteEndpoint(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
+	log.Printf("DELETE %s from %s", r.URL, r.RemoteAddr)
+	identifier, err := extractEndpointIdentifier(r.URL.String())
+	if err != nil {
+		log.Printf("extract endpoint identifier of %s: %v", r.URL, err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	cfg.mu.Lock()
+	delete(cfg.config, identifier)
+	cfg.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func getEndpoints(w http.ResponseWriter, r *http.Request, rdb *redis.Client) {
 	if r.Method != http.MethodGet {
 		log.Printf("request from %s rejected: method %s not allowed",
 			r.RemoteAddr, r.Method)
@@ -197,7 +228,6 @@ func writeConfig(config Config, configPath string) error {
 func mustReadConfig(configPath string) Config {
 	file, err := os.Open(configPath)
 	if os.IsNotExist(err) {
-		// just start with an empty config
 		log.Printf(`the config file "%s" does not exist`, configPath)
 		return Config{}
 	}
