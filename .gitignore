@@ -1,0 +1,31 @@
+# Golang specific ignores
+/bin/
+/pkg/
+/vendor/
+
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, coverage data, and output
+*.test
+*.out
+*.coverprofile
+
+# Go module files
+go.sum
+
+# Dependency directories (alternative to vendoring)
+**/node_modules/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# IDE specific ignores
+# JetBrains (IntelliJ IDEA, GoLand, etc.)
+.idea/
+*.iml
+out/
